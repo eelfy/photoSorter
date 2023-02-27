@@ -72,5 +72,5 @@ export const APP_START = () => {
 
     createDirByName(SORT_DIR);
     start(fileName);
-    console.log('вроде должно сработать!');
+    console.log('done');
 }

@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "start": "ts-node ./index.ts",
+    "debug": "ts-node --inspect  ./index.ts"
+  },
   "dependencies": {
     "xlsx": "^0.18.5"
   },

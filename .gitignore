@@ -1,3 +1,13 @@
 node_modules
 sortedPhotos
 dist
+
+rawPhotos
+
+file.json
+list.json
+persons.json
+rawPersons.json
+
+spread2.xlsx
+spread.xlsx

@@ -1,17 +1,24 @@
-import { RAW_DIR } from './config/app.config';
+import { ARR_EN_FROM_B_TO_R, ARR_EN_FROM_E_TO_R, RAW_DIR } from './config/app.config';
 import { WorkBook, WorkSheet, readFile } from 'xlsx';
-import { ParseIndexes, UserOption } from './lib/types';
-import { createDirByName, getFileName, getPhotoDirPath, getSortedUserDirPath } from './lib/utils';
+import { AlbumSpread, CellContent, NewUserOption, ParseIndexes, RawPerson } from './lib/types';
+import { createDirByName, createUserDirSkeleton, getFileName, getPhotoDirPath, getPortraitPath, getSpreadPath } from './lib/utils';
 import { SORT_DIR } from './config';
-import { copyFileSync } from 'fs';
+import { copyFileSync, writeFile } from 'fs';
 
 const fileName = getFileName();
 
+const letterRgx = /[^a-zA-Z]+/g;
+const numberRgx = /^\D+/g;
+
 export const APP_START = () => {
     const getParseIndexes = (workSheet: WorkSheet): ParseIndexes => {
-        const [start, end] = workSheet['!ref']!.split(':').map(column => column[1]);
+        const [start, end] = workSheet['!ref']!.split(":").map(str => ({
+            letter: str.replace(letterRgx, ''),
+            number: Number(str.replace(numberRgx, ''))
+        }))
+
         return {
-            start: String(Number(start) + 1),
+            start,
             end
         }
     };
@@ -21,43 +28,160 @@ export const APP_START = () => {
         return targetList;
     };
 
-    const getPicked = (rawPicked: string | number ) => {
-        if(!rawPicked) return [];
+    const getFioPos = (list: WorkSheet, indexes: ParseIndexes) => {
+        const fioPos: number[] = []
 
-        if(typeof rawPicked === 'number') return [String(rawPicked)];
+        const { letter: startLetter, number: startNumber } = indexes.start
+        const { letter: endLetter, number: endNumber } = indexes.end
 
-        if(rawPicked.length === 1) return [rawPicked];
-        
-        return rawPicked.split(', ');
-    }
+        let fioCounter = startNumber;
 
-    const getUsersOptions = (list: WorkSheet, indexes: ParseIndexes ): UserOption[] => {
-        const userOptions: UserOption[] = Array();
-        let start = Number(indexes.start);
-        const end = Number(indexes.end);
-        while(start <= end) {
-            userOptions.push({
-                name: list[`A${start}`].v,
-                picked: getPicked(list[`B${start}`].v)
-            })
-            start += 1;
+        while (fioCounter < endNumber) {
+            const currentEl = `B${fioCounter}`
+            if (list[currentEl]?.v === "Имя Фамилия") {
+                fioPos.push(Number(currentEl.replace(numberRgx, '')))
+            }
+
+            fioCounter += 1;
         }
-        return userOptions;
+
+        return fioPos
     }
 
-    const movePhotosToSortDir = (sortedDirPath: string, picked: UserOption['picked']) => {
-        picked.forEach(pick => {
-            const oldPath = getPhotoDirPath(RAW_DIR, pick);
-            const newPath = getPhotoDirPath(sortedDirPath, pick);
+    const getRawPersons = (list: WorkSheet, fioPos: number[]) => {
+        const persons: RawPerson[] = []
+
+        fioPos.forEach((pos, posInd, currArr) => {
+            const person: RawPerson = {}
+            let nextFioPos = currArr[posInd + 1];
+
+            ARR_EN_FROM_B_TO_R.forEach(alphabetChr => {
+                let currPosCntr = pos;
+                while (currPosCntr < nextFioPos) {
+                    const currCell = `${alphabetChr}${currPosCntr}`
+                    if (list[currCell]) {
+                        person[currCell] = list[currCell]
+                    }
+
+                    currPosCntr += 1
+                }
+            })
+            persons.push(person)
+        })
+
+        return persons
+    }
+
+    const getFioFromRawPerson = (rawPerson: RawPerson) => {
+        const cellValue = Object.values(rawPerson)[1]?.v
+        if (typeof cellValue === 'string') return cellValue
+    }
+
+    const getPortraitFromRawPerson = (rawPerson: RawPerson) => {
+        let rawPort = Object.values(rawPerson)[5]?.v;
+
+        if (typeof rawPort === 'string') {
+            rawPort = rawPort.trim()
+        }
+        return rawPort
+    }
+
+    const getAlbumSpreadsFromRawPersons = (rawPerson: RawPerson): AlbumSpread[] => {
+        const spreads: {
+            key: string
+            name: string
+        }[] = []
+
+        const rawPersonEntries = Object.entries(rawPerson)
+
+        rawPersonEntries.forEach(([key, value]) => {
+            if (typeof value.v === 'string' && value.v.includes('разворот')) {
+                spreads.push({
+                    key,
+                    name: value.v
+                })
+            }
+        })
+
+        const updatedSpreads: AlbumSpread[] = spreads.map(({ key, name }) => {
+            const numberFromKey = key.replace(numberRgx, '')
+            const photos: (string | number)[] = []
+
+            ARR_EN_FROM_E_TO_R.forEach(char => {
+                let rawCurrentCell = rawPerson[`${char}${numberFromKey}`]?.v
+
+                if (typeof rawCurrentCell === 'string') {
+                    rawCurrentCell = rawCurrentCell.trim()
+                }
+
+                if (rawCurrentCell) {
+                    photos.push(rawCurrentCell)
+                }
+            })
+
+            return {
+                name,
+                photos
+            }
+        })
+
+        return updatedSpreads
+    }
+
+    const getUsersOptions = (list: WorkSheet, indexes: ParseIndexes) => {
+        // writeFile("rawPersons.json", JSON.stringify(rawPersons), () => { });
+        const fioPos = getFioPos(list, indexes)
+        const rawPersons = getRawPersons(list, fioPos)
+
+        const userOptions: NewUserOption[] = rawPersons.map(rawPerson => {
+            return {
+                fio: getFioFromRawPerson(rawPerson),
+                portrait: getPortraitFromRawPerson(rawPerson),
+                albumSpreads: getAlbumSpreadsFromRawPersons(rawPerson)
+            }
+        })
+
+        return userOptions
+    }
+
+    const movePhotoToSortDir = (sortedDirPath: string, picked: CellContent) => {
+        try {
+            const oldPath = getPhotoDirPath(RAW_DIR, picked);
+            const newPath = getPhotoDirPath(sortedDirPath, picked);
             copyFileSync(oldPath, newPath);
+        } catch (error) {
+            console.log(error);
+        }
+    }
+
+    const fillThePortraitDir = ({ portrait, fio }: NewUserOption) => {
+        if (!fio) {
+            return
+        }
+        movePhotoToSortDir(getPortraitPath(fio), portrait)
+    }
+
+
+    const fillSpreads = ({ albumSpreads, fio }: NewUserOption) => {
+        if (!fio) {
+            return
+        }
+        albumSpreads.forEach(spread => {
+            spread.photos.forEach(photo => {
+                movePhotoToSortDir(
+                    getSpreadPath(fio, spread.name),
+                    photo
+                )
+            })
         })
     }
 
-    const sortPhotos = (userOptions: UserOption[]) => {
+    const sortPhotos = (userOptions: NewUserOption[]) => {
         userOptions.forEach(option => {
-            const userSortedDirPath = getSortedUserDirPath(option);
-            createDirByName(userSortedDirPath);
-            movePhotosToSortDir(userSortedDirPath, option.picked)
+            createUserDirSkeleton(option)
+
+            fillThePortraitDir(option)
+            fillSpreads(option)
         });
     }
 
@@ -66,7 +190,7 @@ export const APP_START = () => {
         const targetList = getTargetWorkSheet(xlsxFile);
         const indexes = getParseIndexes(targetList)
         const userOptions = getUsersOptions(targetList, indexes);
-       
+
         sortPhotos(userOptions);
     };
 
